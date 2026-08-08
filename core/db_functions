@@ -1,0 +1,89 @@
+import os
+import sqlite3
+
+# ---------------------------------------------------------------------------
+# SQLite database — persists every scan result so it's searchable later.
+# ---------------------------------------------------------------------------
+
+DB_PATH = ".database/scans.db"
+
+
+def init_db():
+    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS scan_results (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ip TEXT NOT NULL,
+            port INTEGER NOT NULL,
+            service_guess TEXT,
+            banner TEXT,
+            version TEXT,
+            http_server TEXT,
+            page_title TEXT,
+            tls_subject TEXT,
+            tls_issuer TEXT,
+            tls_not_after TEXT,
+            timestamp TEXT NOT NULL
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_ip ON scan_results(ip)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_port ON scan_results(port)")
+    conn.execute("""
+        DELETE FROM scan_results
+        WHERE id NOT IN (SELECT MAX(id) FROM scan_results GROUP BY ip, port)
+    """)
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_ip_port_unique ON scan_results(ip, port)")
+    conn.commit()
+    return conn
+
+
+def save_entry_to_db(conn, ip, port, entry):
+    """Upsert: re-scanning an (ip, port) that's already in the DB updates
+    that row (banner/version/timestamp refreshed) instead of adding a new
+    one, so the table never accumulates duplicates."""
+    tls = entry.get("tls") or {}
+    conn.execute(
+        """INSERT INTO scan_results
+           (ip, port, service_guess, banner, version, http_server, page_title,
+            tls_subject, tls_issuer, tls_not_after, timestamp)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?)
+           ON CONFLICT(ip, port) DO UPDATE SET
+               service_guess = excluded.service_guess,
+               banner        = excluded.banner,
+               version       = excluded.version,
+               http_server   = excluded.http_server,
+               page_title    = excluded.page_title,
+               tls_subject   = excluded.tls_subject,
+               tls_issuer    = excluded.tls_issuer,
+               tls_not_after = excluded.tls_not_after,
+               timestamp     = excluded.timestamp
+        """,
+        (
+            ip, port, entry.get("service_guess"), entry.get("banner"),
+            entry.get("version"), entry.get("http_server"), entry.get("page_title"),
+            tls.get("subject"), tls.get("issuer"), tls.get("not_after"),
+            entry.get("timestamp"),
+        ),
+    )
+    conn.commit()
+
+
+def search_db(conn, query, limit=500):
+    like = f"%{query}%"
+    cur = conn.execute(
+        """SELECT ip, port, service_guess, banner, version, http_server,
+                  tls_issuer, tls_not_after, timestamp
+           FROM scan_results
+           WHERE ip LIKE ? OR banner LIKE ? OR service_guess LIKE ?
+              OR version LIKE ? OR http_server LIKE ? OR page_title LIKE ?
+           ORDER BY id DESC LIMIT ?""",
+        (like, like, like, like, like, like, limit),
+    )
+    return cur.fetchall()
+
+
+def db_stats(conn):
+    total = conn.execute("SELECT COUNT(*) FROM scan_results").fetchone()[0]
+    hosts = conn.execute("SELECT COUNT(DISTINCT ip) FROM scan_results").fetchone()[0]
+    return total, hosts
