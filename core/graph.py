@@ -1,34 +1,64 @@
 import sys
 import json
+import re
 from PyQt5.QtCore import Qt, QRectF, QLineF
 from PyQt5.QtGui import QPen, QColor, QFont, QPainter, QBrush, QFontMetrics
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QGraphicsView, QGraphicsScene,
     QGraphicsItem, QGraphicsLineItem, QMenu, QToolBar, QAction, 
-    QInputDialog, QFileDialog, QMessageBox
+    QFileDialog, QMessageBox, QDialog, QVBoxLayout, QHBoxLayout,
+    QLabel, QLineEdit, QTextEdit, QComboBox, QPushButton, QButtonGroup,
+    QRadioButton, QWidget, QDockWidget, QFrame
 )
 
 
 def raw_json_to_graph(raw_data, root_label="ROOT"):
-    """Recursively converts arbitrary raw JSON data into graph format."""
+    """Recursively converts raw JSON into graph format using Regex pattern matching for accuracy."""
     nodes = []
     edges = []
     node_counter = [0]
 
-    def get_node_type(val):
-        if isinstance(val, dict):
-            return "Domain"
-        elif isinstance(val, list):
-            return "URL"
-        elif isinstance(val, (int, float)):
+    # Regular Expressions for Entity Type Matching
+    IP_REGEX = re.compile(r"^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$")
+    EMAIL_REGEX = re.compile(r"^[\w\.-]+@[\w\.-]+\.\w+$")
+    URL_REGEX = re.compile(r"^https?://[^\s/$.?#].[^\s]*$", re.IGNORECASE)
+    DOMAIN_REGEX = re.compile(r"^(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$")
+    PHONE_REGEX = re.compile(r"^\+?[0-9\s\-()]{7,15}$")
+
+    def get_node_type(val, key=""):
+        str_val = str(val).strip()
+        key_lower = str(key).lower()
+
+        if IP_REGEX.match(str_val):
             return "IP"
-        return "generic"
+        if EMAIL_REGEX.match(str_val):
+            return "email address"
+        if URL_REGEX.match(str_val):
+            return "URL"
+        if DOMAIN_REGEX.match(str_val):
+            return "domain name"
+        if PHONE_REGEX.match(str_val):
+            return "phone number"
+
+        # Fallback key-based detection
+        if any(k in key_lower for k in ["user", "person", "name", "author"]):
+            return "person"
+        if any(k in key_lower for k in ["location", "address", "city", "country"]):
+            return "location"
+        if any(k in key_lower for k in ["org", "company", "vendor"]):
+            return "company"
+        if any(k in key_lower for k in ["site", "web"]):
+            return "website"
+        if any(k in key_lower for k in ["event", "time", "date"]):
+            return "event"
+
+        return "domain name" if isinstance(val, dict) else "website" if isinstance(val, list) else "IP"
 
     def traverse(data, key_label, parent_id=None, depth=0, y_offset=[0]):
         node_counter[0] += 1
         node_id = f"node_{node_counter[0]}"
-        node_type = get_node_type(data)
         
+        node_type = get_node_type(data, key=key_label)
         display_label = str(key_label) if isinstance(data, (dict, list)) else f"{key_label}: {data}"
 
         x_pos = depth * 220
@@ -59,13 +89,175 @@ def raw_json_to_graph(raw_data, root_label="ROOT"):
     return {"nodes": nodes, "edges": edges}
 
 
+class AddEntityDialog(QDialog):
+    TYPES = [
+        "company", "domain name", "email address", "event",
+        "IP", "location", "person", "phone number", "URL", "website"
+    ]
+    COLORS = ["#d9d9d9", "#d4ac0d", "#cb4335", "#212f3d", "#1f6feb", "#8957e5", "#238636", "#7e5109", "#d35400"]
+    BADGES = ["none", "check", "alert", "cross", "question", "minus", "wait"]
+
+    def __init__(self, parent=None, default_label="", default_type="IP", default_url=""):
+        super().__init__(parent)
+        self.setWindowTitle("ADD AN ENTITY")
+        self.setMinimumWidth(700)
+        self.setStyleSheet("""
+            QDialog { background-color: #161b22; font-family: 'Segoe UI', sans-serif; }
+            QLabel { font-weight: bold; color: #c9d1d9; font-size: 11px; }
+            QLineEdit, QTextEdit, QComboBox { background: #0d1117; color: #c9d1d9; border: 1px solid #30363d; border-radius: 4px; padding: 6px; }
+            
+            /* Type buttons default state */
+            QPushButton.type-chip { 
+                background: #21262d; 
+                border: 1px solid #30363d; 
+                border-radius: 4px; 
+                padding: 6px 10px; 
+                font-weight: bold; 
+                color: #c9d1d9; 
+            }
+            QPushButton.type-chip:hover { 
+                background-color: #30363d; 
+                border-color: #8b949e; 
+            }
+            /* High-contrast active/selected state */
+            QPushButton.type-chip:checked { 
+                background-color: #1f6feb !important; 
+                color: #ffffff !important; 
+                border: 1px solid #58a6ff !important; 
+            }
+            
+            QPushButton { background: #21262d; color: #c9d1d9; border: 1px solid #30363d; border-radius: 4px; padding: 6px; }
+        """)
+
+        main_layout = QHBoxLayout(self)
+        left_layout = QVBoxLayout()
+        right_layout = QVBoxLayout()
+
+        left_layout.addWidget(QLabel("BASICS"))
+        self.value_input = QLineEdit(default_label)
+        self.value_input.setPlaceholderText("value *")
+        left_layout.addWidget(self.value_input)
+
+        self.url_input = QLineEdit(default_url)
+        self.url_input.setPlaceholderText("url")
+        left_layout.addWidget(self.url_input)
+
+        left_layout.addWidget(QLabel("TYPE AND COUNTRY 💡"))
+        
+        # Setup mutually exclusive button group for Entity Types
+        self.type_group = QButtonGroup(self)
+        self.type_group.setExclusive(True)
+
+        chip_layout1 = QHBoxLayout()
+        chip_layout2 = QHBoxLayout()
+
+        for idx, t in enumerate(self.TYPES):
+            btn = QPushButton(t)
+            btn.setCheckable(True)
+            btn.setProperty("class", "type-chip")
+            
+            if t.lower() == default_type.lower():
+                btn.setChecked(True)
+                
+            self.type_group.addButton(btn)
+
+            if idx < 5:
+                chip_layout1.addWidget(btn)
+            else:
+                chip_layout2.addWidget(btn)
+
+        # Fallback check if default_type didn't match
+        if not self.type_group.checkedButton() and self.type_group.buttons():
+            self.type_group.buttons()[0].setChecked(True)
+
+        left_layout.addLayout(chip_layout1)
+        left_layout.addLayout(chip_layout2)
+
+        self.country_box = QComboBox()
+        self.country_box.addItems(["country...", "United States", "Germany", "France", "United Kingdom", "Japan"])
+        left_layout.addWidget(self.country_box)
+
+        left_layout.addWidget(QLabel("OPTIONS"))
+        color_layout = QHBoxLayout()
+        color_layout.addWidget(QLabel("Color"))
+        self.color_group = QButtonGroup(self)
+        self.selected_color = self.COLORS[6]
+        for c in self.COLORS:
+            btn = QPushButton()
+            btn.setFixedSize(20, 20)
+            btn.setStyleSheet(f"background-color: {c}; border: 1px solid #30363d; border-radius: 2px;")
+            btn.setCheckable(True)
+            btn.clicked.connect(lambda checked, col=c: setattr(self, 'selected_color', col))
+            self.color_group.addButton(btn)
+            color_layout.addWidget(btn)
+        left_layout.addLayout(color_layout)
+
+        badge_layout = QHBoxLayout()
+        badge_layout.addWidget(QLabel("Badge"))
+        self.badge_box = QComboBox()
+        self.badge_box.addItems(self.BADGES)
+        badge_layout.addWidget(self.badge_box)
+        left_layout.addLayout(badge_layout)
+
+        size_layout = QHBoxLayout()
+        size_layout.addWidget(QLabel("Size"))
+        self.size_group = QButtonGroup(self)
+        for sz in ["S", "M", "L"]:
+            rbtn = QRadioButton(sz)
+            rbtn.setStyleSheet("color: #c9d1d9;")
+            if sz == "M":
+                rbtn.setChecked(True)
+            self.size_group.addButton(rbtn)
+            size_layout.addWidget(rbtn)
+        left_layout.addLayout(size_layout)
+
+        right_layout.addWidget(QLabel("COMMENTS"))
+        self.comments_input = QTextEdit()
+        self.comments_input.setPlaceholderText("Enter comments or description...")
+        right_layout.addWidget(self.comments_input)
+
+        btn_layout = QHBoxLayout()
+        cancel_btn = QPushButton("CANCEL")
+        cancel_btn.clicked.connect(self.reject)
+        add_btn = QPushButton("ADD")
+        add_btn.setStyleSheet("background: #238636; color: white; font-weight: bold; border-radius: 4px; padding: 6px 16px;")
+        add_btn.clicked.connect(self.accept)
+        btn_layout.addWidget(cancel_btn)
+        btn_layout.addWidget(add_btn)
+
+        right_layout.addLayout(btn_layout)
+
+        main_layout.addLayout(left_layout, stretch=3)
+        main_layout.addLayout(right_layout, stretch=2)
+
+    def get_data(self):
+        selected_type = "IP"
+        if self.type_group.checkedButton():
+            selected_type = self.type_group.checkedButton().text()
+
+        selected_size = "M"
+        for btn in self.size_group.buttons():
+            if btn.isChecked():
+                selected_size = btn.text()
+
+        return {
+            "label": self.value_input.text() or "New Entity",
+            "url": self.url_input.text().strip(),
+            "type": selected_type,
+            "color": self.selected_color,
+            "badge": self.badge_box.currentText(),
+            "size": selected_size,
+            "country": self.country_box.currentText(),
+            "comments": self.comments_input.toPlainText()
+        }
+
+
 class Edge(QGraphicsLineItem):
     def __init__(self, source_node, target_node):
         super().__init__()
         self.source = source_node
         self.target = target_node
         
-        # Enable selection and mouse interactions on the edge
         self.setFlags(QGraphicsItem.ItemIsSelectable)
         self.setAcceptHoverEvents(True)
         
@@ -81,9 +273,7 @@ class Edge(QGraphicsLineItem):
         self.update_position()
 
     def update_position(self):
-        line = self.line()
-        line.setP1(self.source.scenePos())
-        line.setP2(self.target.scenePos())
+        line = QLineF(self.source.scenePos(), self.target.scenePos())
         self.setLine(line)
 
     def hoverEnterEvent(self, event):
@@ -97,7 +287,6 @@ class Edge(QGraphicsLineItem):
         super().hoverLeaveEvent(event)
 
     def paint(self, painter, option, widget):
-        # Change pen depending on selection state
         if self.isSelected():
             self.setPen(self.selected_pen)
         super().paint(painter, option, widget)
@@ -108,7 +297,6 @@ class Edge(QGraphicsLineItem):
             QMenu { background-color: #161b22; color: #c9d1d9; border: 1px solid #30363d; }
             QMenu::item:selected { background-color: #f85149; color: white; }
         """)
-
         delete_action = menu.addAction("🗑️ Delete Edge")
         action = menu.exec_(event.screenPos())
 
@@ -117,13 +305,34 @@ class Edge(QGraphicsLineItem):
 
 
 class EntityNode(QGraphicsItem):
-    TYPES = ["IP", "Domain", "URL", "generic"]
+    TYPES = [
+        "company", "domain name", "email address", "event",
+        "IP", "location", "person", "phone number", "URL", "website"
+    ]
 
-    def __init__(self, entity_id, label, entity_type="generic"):
+    ICON_MAP = {
+        "IP": "🌐",
+        "domain name": "🌐",
+        "URL": "🔗",
+        "website": "💻",
+        "person": "👤",
+        "location": "📍",
+        "email address": "✉️",
+        "phone number": "📞",
+        "company": "🏢",
+        "event": "📅"
+    }
+
+    def __init__(self, entity_id, label, entity_type="IP", color="#238636", comments="", badge="none", size="M", url=""):
         super().__init__()
         self.id = entity_id
         self.label = label
-        self.entity_type = entity_type if entity_type in self.TYPES else "generic"
+        self.url = url
+        self.entity_type = entity_type
+        self.accent_color = QColor(color)
+        self.comments = comments
+        self.badge = badge
+        self.node_size = size
         self.edges = []
 
         self.setFlags(
@@ -133,49 +342,52 @@ class EntityNode(QGraphicsItem):
         )
         self.setZValue(1)
 
-        self.min_width = 120
-        self.height = 45
-        self.font = QFont("Consolas", 8, QFont.Bold)
-
-        self.color_map = {
-            "IP": QColor("#1f6feb"),       # Blue
-            "Domain": QColor("#238636"),   # Green
-            "URL": QColor("#8957e5"),      # Purple
-            "generic": QColor("#30363d")   # Dark Grey
-        }
-
-    def get_calculated_width(self):
-        metrics = QFontMetrics(self.font)
-        text_width = metrics.horizontalAdvance(self.label)
-        return max(self.min_width, text_width + 28)
+        self.radius_map = {"S": 30, "M": 42, "L": 55}
+        self.radius = self.radius_map.get(self.node_size, 42)
 
     def boundingRect(self):
-        width = self.get_calculated_width()
-        return QRectF(-width / 2, -self.height / 2, width, self.height)
+        r = self.radius + 15
+        return QRectF(-r, -r, r * 2, r * 2 + 25)
 
     def paint(self, painter, option, widget):
         painter.setRenderHint(QPainter.Antialiasing)
-        width = self.get_calculated_width()
-        rect = QRectF(-width / 2, -self.height / 2, width, self.height)
+        r = self.radius
 
+        # Halo Ring on Node Selection
         if self.isSelected():
-            painter.setPen(QPen(QColor("#58a6ff"), 2, Qt.DashLine))
-        else:
-            painter.setPen(QPen(QColor("#30363d"), 1))
+            halo_pen = QPen(self.accent_color, 12)
+            painter.setPen(halo_pen)
+            painter.setBrush(Qt.NoBrush)
+            painter.drawEllipse(QRectF(-r - 6, -r - 6, (r + 6) * 2, (r + 6) * 2))
 
-        painter.setBrush(QBrush(QColor("#161b22")))
-        painter.drawRoundedRect(rect, 6, 6)
+        painter.setPen(QPen(QColor("#30363d"), 2))
+        painter.setBrush(QBrush(QColor("#21262d")))
+        painter.drawEllipse(QRectF(-r, -r, r * 2, r * 2))
 
-        badge_color = self.color_map.get(self.entity_type, self.color_map["generic"])
-        badge_rect = QRectF(-width / 2, -self.height / 2, 8, self.height)
+        inner_r = r * 0.55
         painter.setPen(Qt.NoPen)
-        painter.setBrush(QBrush(badge_color))
-        painter.drawRoundedRect(badge_rect, 2, 2)
+        painter.setBrush(QBrush(QColor("#161b22")))
+        painter.drawEllipse(QRectF(-inner_r, -inner_r, inner_r * 2, inner_r * 2))
+
+        # Dynamic Icon Rendering
+        painter.setPen(QPen(QColor("#ffffff")))
+        painter.setFont(QFont("Segoe UI Emoji", int(inner_r * 0.55)))
+        icon = self.ICON_MAP.get(self.entity_type, "🏷️")
+        painter.drawText(QRectF(-inner_r, -inner_r, inner_r * 2, inner_r * 2), Qt.AlignCenter, icon)
+
+        # Bottom Text Banner
+        painter.setFont(QFont("Segoe UI", 10, QFont.Bold))
+        metrics = QFontMetrics(painter.font())
+        tw = metrics.horizontalAdvance(self.label) + 16
+        th = 22
+        lbl_rect = QRectF(-tw / 2, r + 4, tw, th)
+
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QBrush(QColor("#161b22")))
+        painter.drawRoundedRect(lbl_rect, 4, 4)
 
         painter.setPen(QPen(QColor("#c9d1d9")))
-        painter.setFont(self.font)
-        text_rect = QRectF(-width / 2 + 14, -self.height / 2, width - 18, self.height)
-        painter.drawText(text_rect, Qt.AlignVCenter | Qt.AlignLeft, self.label)
+        painter.drawText(lbl_rect, Qt.AlignCenter, self.label)
 
     def add_edge(self, edge):
         if edge not in self.edges:
@@ -185,12 +397,9 @@ class EntityNode(QGraphicsItem):
         if change == QGraphicsItem.ItemPositionHasChanged:
             for edge in self.edges:
                 edge.update_position()
+            if self.scene() and hasattr(self.scene(), 'node_selected_callback') and self.scene().node_selected_callback:
+                self.scene().node_selected_callback(self)
         return super().itemChange(change, value)
-
-    def set_type(self, new_type):
-        if new_type in self.TYPES:
-            self.entity_type = new_type
-            self.update()
 
     def contextMenuEvent(self, event):
         menu = QMenu()
@@ -198,70 +407,147 @@ class EntityNode(QGraphicsItem):
             QMenu { background-color: #161b22; color: #c9d1d9; border: 1px solid #30363d; }
             QMenu::item:selected { background-color: #1f6feb; color: white; }
         """)
-
         scene = self.scene()
         selected_nodes = [item for item in scene.selectedItems() if isinstance(item, EntityNode)]
-        
+
         if self not in selected_nodes:
             scene.clearSelection()
             self.setSelected(True)
             selected_nodes = [self]
 
-        count = len(selected_nodes)
-        
-        if count == 2:
-            connect_action = menu.addAction("🔗 Connect Selected 2 Nodes")
-            menu.addSeparator()
-        else:
-            connect_action = None
+        if len(selected_nodes) == 2:
+            connect_act = menu.addAction("🔗 Connect Selected Nodes")
+            if menu.exec_(event.screenPos()) == connect_act:
+                scene.connect_nodes(selected_nodes[0], selected_nodes[1])
+            return
 
-        title_text = f"Selected: {count} Node(s)" if count > 1 else f"Entity: {self.label}"
-        title_action = menu.addAction(title_text)
-        title_action.setEnabled(False)
-        menu.addSeparator()
-
-        if count == 1:
-            change_type_menu = menu.addMenu("🏷️ Change Entity Type")
-            type_actions = {}
-            for t in self.TYPES:
-                act = change_type_menu.addAction(t)
-                if t == self.entity_type:
-                    act.setCheckable(True)
-                    act.setChecked(True)
-                type_actions[act] = t
-
-            transform_ip = menu.addAction("Transform: Resolve IP")
-            transform_ports = menu.addAction("Transform: Scan Ports")
-            add_child = menu.addAction("+ Add Connected Node")
-            menu.addSeparator()
-        else:
-            change_type_menu = transform_ip = transform_ports = add_child = None
-
-        delete_node = menu.addAction(f"Delete ({count} selected)" if count > 1 else "Delete Entity")
+        edit_act = menu.addAction("✏️ Edit Entity")
+        add_child_act = menu.addAction("+ Add Connected Entity")
+        delete_act = menu.addAction("🗑️ Delete Entity")
 
         action = menu.exec_(event.screenPos())
-
-        if action == connect_action and count == 2:
-            scene.connect_nodes(selected_nodes[0], selected_nodes[1])
-        elif action == delete_node:
+        if action == edit_act:
+            dlg = AddEntityDialog(None, default_label=self.label, default_type=self.entity_type, default_url=self.url)
+            dlg.comments_input.setText(self.comments)
+            if dlg.exec_() == QDialog.Accepted:
+                data = dlg.get_data()
+                self.label = data["label"]
+                self.url = data["url"]
+                self.entity_type = data["type"]
+                self.accent_color = QColor(data["color"])
+                self.comments = data["comments"]
+                self.node_size = data["size"]
+                self.radius = self.radius_map.get(self.node_size, 42)
+                self.update()
+                if scene.node_selected_callback:
+                    scene.node_selected_callback(self)
+        elif action == add_child_act:
+            scene.add_manual_child(self)
+        elif action == delete_act:
             scene.remove_entities(selected_nodes)
-        elif count == 1:
-            if action in type_actions:
-                self.set_type(type_actions[action])
-            elif action == transform_ip:
-                scene.apply_transform_resolve_domain(self)
-            elif action == transform_ports:
-                scene.apply_transform_scan_ports(self)
-            elif action == add_child:
-                scene.add_manual_child(self)
 
+
+class SideDetailsPanel(QDockWidget):
+    """Side panel displaying detailed node metadata on selection."""
+    def __init__(self, parent=None):
+        super().__init__("Entity Information", parent)
+        self.setFixedWidth(320)
+        self.current_node = None
+        
+        container = QWidget()
+        container.setStyleSheet("background: #161b22; font-family: 'Segoe UI', sans-serif;")
+        layout = QVBoxLayout(container)
+
+        header = QHBoxLayout()
+        self.type_icon = QLabel("📍")
+        self.type_label = QLabel("IP")
+        self.type_label.setStyleSheet("font-weight: bold; color: #58a6ff;")
+        self.group_label = QLabel("DETAILS")
+        self.group_label.setStyleSheet("color: #8b949e; font-style: italic;")
+        header.addWidget(self.type_icon)
+        header.addWidget(self.type_label)
+        header.addWidget(self.group_label)
+        header.addStretch()
+        layout.addLayout(header)
+
+        self.title = QLabel("Select an Entity")
+        self.title.setStyleSheet("font-size: 18px; font-weight: bold; color: #c9d1d9;")
+        layout.addWidget(self.title)
+
+        line = QFrame()
+        line.setFrameShape(QFrame.HLine)
+        line.setStyleSheet("color: #30363d;")
+        layout.addWidget(line)
+
+        # Make the notes editable
+        self.notes = QTextEdit()
+        self.notes.setReadOnly(False) 
+        self.notes.setStyleSheet("""
+            QTextEdit {
+                background: #0d1117; 
+                color: #c9d1d9; 
+                border: 1px solid #30363d; 
+                border-radius: 4px; 
+                padding: 6px;
+                font-size: 12px;
+            }
+        """)
+        self.notes.setPlaceholderText("Type additional comments or notes here...")
+        
+        # Connect text changes to auto-save to the node
+        self.notes.textChanged.connect(self.save_notes_to_node)
+        layout.addWidget(self.notes)
+
+        self.setWidget(container)
+
+    def display_node(self, node):
+        if not self.isVisible():
+            self.show()
+
+        self.notes.blockSignals(True)
+        self.current_node = node
+
+        if not node:
+            self.title.setText("Select an Entity")
+            self.type_label.setText("-")
+            self.notes.clear()
+            self.notes.setEnabled(False)
+        else:
+            self.notes.setEnabled(True)
+            icon = EntityNode.ICON_MAP.get(node.entity_type, "🏷️")
+            self.type_icon.setText(icon)
+            self.type_label.setText(node.entity_type.upper())
+            self.title.setText(node.label)
+
+            content = ""
+            if node.url:
+                content += f"🔗 URL: {node.url}\n\n"
+            content += node.comments if node.comments else ""
+
+            self.notes.setPlainText(content)
+
+        self.notes.blockSignals(False)
+
+    def save_notes_to_node(self):
+        """Saves current text back to the active EntityNode in real-time."""
+        if self.current_node:
+            self.current_node.comments = self.notes.toPlainText()
 
 class InteractiveGraphScene(QGraphicsScene):
-    def __init__(self, parent=None):
+    def __init__(self, node_selected_callback=None, parent=None):
         super().__init__(parent)
         self.setBackgroundBrush(QBrush(QColor("#0d1117")))
         self.nodes = {}
         self.edges_list = []
+        self.node_selected_callback = node_selected_callback
+        self.selectionChanged.connect(self.handle_selection_changed)
+
+    def handle_selection_changed(self):
+        selected = [item for item in self.selectedItems() if isinstance(item, EntityNode)]
+        if selected and self.node_selected_callback:
+            self.node_selected_callback(selected[0])
+        elif self.node_selected_callback:
+            self.node_selected_callback(None)
 
     def load_from_json(self, json_data):
         self.clear()
@@ -269,16 +555,16 @@ class InteractiveGraphScene(QGraphicsScene):
         self.edges_list.clear()
 
         for item in json_data.get("nodes", []):
-            node = EntityNode(str(item["id"]), item["label"], item.get("type", "generic"))
+            node = EntityNode(
+                str(item["id"]), 
+                item["label"], 
+                entity_type=item.get("type", "IP"),
+                url=item.get("url", ""),  # Load saved URL
+                comments=item.get("comments", "")
+            )
             node.setPos(item.get("x", 0), item.get("y", 0))
             self.addItem(node)
             self.nodes[str(item["id"])] = node
-
-        for conn in json_data.get("edges", []):
-            src = self.nodes.get(str(conn["source"]))
-            tgt = self.nodes.get(str(conn["target"]))
-            if src and tgt:
-                self.connect_nodes(src, tgt)
 
     def export_to_json(self):
         nodes_data = []
@@ -287,7 +573,9 @@ class InteractiveGraphScene(QGraphicsScene):
             nodes_data.append({
                 "id": str(node_id),
                 "label": node.label,
+                "url": node.url,  # Export URL field
                 "type": node.entity_type,
+                "comments": node.comments,
                 "x": round(pos.x(), 2),
                 "y": round(pos.y(), 2)
             })
@@ -302,7 +590,6 @@ class InteractiveGraphScene(QGraphicsScene):
         return {"nodes": nodes_data, "edges": edges_data}
 
     def connect_nodes(self, source_node, target_node):
-        """Creates an edge between two existing nodes if not connected already."""
         if source_node == target_node:
             return None
             
@@ -316,36 +603,21 @@ class InteractiveGraphScene(QGraphicsScene):
         self.edges_list.append(edge)
         return edge
 
-    def auto_layout(self, cols_per_row=4):
-        """
-        Arranges nodes in a balanced 2D Pyramid/Grid layout.
-        Each parent arranges its direct children into a grid of 'cols_per_row'
-        width, spreading both horizontally and vertically.
-        """
+    def auto_layout(self, node_spacing_x=180, layer_spacing_y=120):
         if not self.nodes:
             return
 
-        import math
-
-        if not isinstance(cols_per_row, int) or cols_per_row < 1:
-            cols_per_row = 4
-
-        # 1. Find root nodes (nodes with no incoming edges)
         targets = {edge.target for edge in self.edges_list}
         roots = [node for node in self.nodes.values() if node not in targets]
         if not roots:
             roots = [next(iter(self.nodes.values()))]
 
         visited = set()
-        global_y = [0.0]
-
-        
-        X_SPACING = 240
-        Y_SPACING = 65
+        global_x = [0.0]
 
         def layout_subtree(node, depth):
             if node.id in visited:
-                return 0
+                return node.scenePos().x()
             visited.add(node.id)
 
             children = []
@@ -354,70 +626,40 @@ class InteractiveGraphScene(QGraphicsScene):
                 if child.id not in visited:
                     children.append(child)
 
+            y_pos = depth * layer_spacing_y
+
             if not children:
-                y_pos = global_y[0] * Y_SPACING
-                node.setPos(depth * X_SPACING, y_pos)
-                global_y[0] += 1.0
-                return 1.0
+                x_pos = global_x[0] * node_spacing_x
+                node.setPos(x_pos, y_pos)
+                global_x[0] += 1.0
+                return x_pos
 
-            num_children = len(children)
-            cols = min(cols_per_row, num_children)
-            rows = math.ceil(num_children / cols)
-
-            start_y = global_y[0]
-
-            for idx, child in enumerate(children):
-                col = idx % cols
-                row = idx // cols
-                child_depth = depth + 1 + col
-                
-                layout_subtree(child, child_depth)
-
-            end_y = global_y[0] - 1.0
-            avg_y = ((start_y + end_y) / 2.0) * Y_SPACING
-            node.setPos(depth * X_SPACING, avg_y)
-
-            return (end_y - start_y + 1.0)
+            child_x = [layout_subtree(c, depth + 1) for c in children]
+            parent_x = (min(child_x) + max(child_x)) / 2.0
+            node.setPos(parent_x, y_pos)
+            return parent_x
 
         for root in roots:
             layout_subtree(root, 0)
-            global_y[0] += 1.5
-
-    def apply_transform_resolve_domain(self, parent_node):
-        new_id = f"node_{len(self.nodes) + 1}"
-        new_node = EntityNode(new_id, f"sub.{parent_node.label}", entity_type="Domain")
-        pos = parent_node.scenePos()
-        new_node.setPos(pos.x() + 220, pos.y() + 60)
-        
-        self.addItem(new_node)
-        self.nodes[new_id] = new_node
-        self.connect_nodes(parent_node, new_node)
-
-    def apply_transform_scan_ports(self, parent_node):
-        ports = ["80/tcp", "443/tcp"]
-        pos = parent_node.scenePos()
-        for i, port in enumerate(ports):
-            new_id = f"node_{len(self.nodes) + 1}"
-            new_node = EntityNode(new_id, port, entity_type="URL")
-            new_node.setPos(pos.x() + 220, pos.y() - 30 + (i * 60))
-            
-            self.addItem(new_node)
-            self.nodes[new_id] = new_node
-            self.connect_nodes(parent_node, new_node)
+            global_x[0] += 0.5
 
     def add_manual_child(self, parent_node):
-        label, ok = QInputDialog.getText(None, "Add Node", "Enter entity label:")
-        if ok and label:
-            entity_type, type_ok = QInputDialog.getItem(
-                None, "Select Type", "Entity Type:", EntityNode.TYPES, 0, False
-            )
-            if not type_ok:
-                entity_type = "generic"
-
+        dlg = AddEntityDialog(None, default_label="")
+        if dlg.exec_() == QDialog.Accepted:
+            data = dlg.get_data()
             new_id = f"node_{len(self.nodes) + 1}"
-            new_node = EntityNode(new_id, label, entity_type=entity_type)
+            new_node = EntityNode(
+                new_id, 
+                data["label"], 
+                entity_type=data["type"],
+                url=data["url"],
+                color=data["color"],
+                comments=data["comments"],
+                badge=data["badge"],
+                size=data["size"]
+            )
             pos = parent_node.scenePos()
-            new_node.setPos(pos.x() + 200, pos.y())
+            new_node.setPos(pos.x() + 180, pos.y() + 120)
             
             self.addItem(new_node)
             self.nodes[new_id] = new_node
@@ -425,13 +667,7 @@ class InteractiveGraphScene(QGraphicsScene):
 
     def remove_entity(self, node):
         for edge in list(node.edges):
-            if edge in self.edges_list:
-                self.edges_list.remove(edge)
-            if edge in edge.source.edges:
-                edge.source.edges.remove(edge)
-            if edge in edge.target.edges:
-                edge.target.edges.remove(edge)
-            self.removeItem(edge)
+            self.remove_edge(edge)
         
         if node.id in self.nodes:
             del self.nodes[node.id]
@@ -440,6 +676,8 @@ class InteractiveGraphScene(QGraphicsScene):
     def remove_entities(self, nodes_to_remove):
         for node in list(nodes_to_remove):
             self.remove_entity(node)
+        if self.node_selected_callback:
+            self.node_selected_callback(None)
 
     def remove_edge(self, edge):
         if edge in self.edges_list:
@@ -463,6 +701,7 @@ class GraphView(QGraphicsView):
         self.setViewportUpdateMode(QGraphicsView.FullViewportUpdate)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.setBackgroundBrush(QBrush(QColor("#0d1117")))
 
         self.drag_line = None
         self.drag_start_node = None
@@ -474,7 +713,6 @@ class GraphView(QGraphicsView):
     def keyPressEvent(self, event):
         if event.key() in (Qt.Key_Delete, Qt.Key_Backspace):
             selected_items = self.scene().selectedItems()
-            
             selected_nodes = [item for item in selected_items if isinstance(item, EntityNode)]
             selected_edges = [item for item in selected_items if isinstance(item, Edge)]
             
@@ -486,7 +724,6 @@ class GraphView(QGraphicsView):
             super().keyPressEvent(event)
 
     def mousePressEvent(self, event):
-        # Shift + Left Click to start drag-connecting nodes
         if event.button() == Qt.LeftButton and event.modifiers() & Qt.ShiftModifier:
             item = self.itemAt(event.pos())
             if isinstance(item, EntityNode):
