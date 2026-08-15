@@ -8,18 +8,19 @@ import concurrent.futures
 from datetime import datetime
 
 from PyQt5.QtWidgets import (
-    QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
+    QApplication, QWidget, QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
     QPushButton, QTableWidget, QTableWidgetItem, QCheckBox, QTextEdit,
     QFileDialog, QMessageBox, QHeaderView, QSpinBox, QTabWidget,
     QToolButton, QListWidget, QTextBrowser, QSplitter, QToolBar, QAction, QInputDialog
 )
 from PyQt5.QtCore import QThread, pyqtSignal, Qt
 
+from core.detailed_scan import DETAILED_SCAN_MODULES
 from core.beauty import render_host_page_html, CYBERPUNK_QSS
-from core.graph import InteractiveGraphScene, GraphView, EntityNode, raw_json_to_graph
 from core.db_functions import DB_PATH, init_db, save_entry_to_db, search_db, db_stats
 from core.scan import COMMON_PORTS, WEB_PORTS, set_tor_enabled, scan_host, expand_targets
-from core.detailed_scan import DETAILED_SCAN_MODULES
+from core.graph import AddEntityDialog, InteractiveGraphScene, GraphView, EntityNode, AddEntityDialog, SideDetailsPanel, raw_json_to_graph
+
 
 class ScanWorker(QThread):
     host_done = pyqtSignal(dict)
@@ -84,13 +85,20 @@ class DetailedScanWorker(QThread):
 class GraphTabWidget(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
+        
+        # 1. Main horizontal layout to hold the Graph View + Right Details Panel
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
 
-        self.scene = InteractiveGraphScene()
+        # 2. Instantiate Side Details Panel
+        self.details_panel = SideDetailsPanel(self)
+
+        # 3. Instantiate Scene with callback to update details panel on selection
+        self.scene = InteractiveGraphScene(node_selected_callback=self.details_panel.display_node)
         self.view = GraphView(self.scene)
 
+        # 4. Toolbar Setup
         toolbar = QToolBar("Graph Toolbar")
         toolbar.setStyleSheet("""
             QToolBar { background-color: #161b22; border-bottom: 1px solid #30363d; padding: 4px; }
@@ -108,7 +116,7 @@ class GraphTabWidget(QWidget):
 
         toolbar.addSeparator()
 
-        add_root_btn = QAction("+ New Root Node", self)
+        add_root_btn = QAction("➕ New Root Node", self)
         add_root_btn.triggered.connect(self.add_root_node)
         toolbar.addAction(add_root_btn)
 
@@ -116,8 +124,18 @@ class GraphTabWidget(QWidget):
         layout_btn.triggered.connect(self.scene.auto_layout)
         toolbar.addAction(layout_btn)
 
-        layout.addWidget(toolbar)
-        layout.addWidget(self.view)
+        main_layout.addWidget(toolbar)
+
+        # 5. Splitter/Container layout to place View and Details Panel side-by-side
+        content_widget = QWidget()
+        content_layout = QHBoxLayout(content_widget)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(0)
+        
+        content_layout.addWidget(self.view, stretch=4)
+        content_layout.addWidget(self.details_panel, stretch=1)
+
+        main_layout.addWidget(content_widget)
 
     def import_json_dialog(self):
         file_path, _ = QFileDialog.getOpenFileName(self, "Import JSON", "", "JSON Files (*.json)")
@@ -148,21 +166,27 @@ class GraphTabWidget(QWidget):
                 QMessageBox.critical(self, "Error", f"Failed to save JSON file:\n{str(e)}")
 
     def add_root_node(self):
-        label, ok = QInputDialog.getText(self, "New Root Entity", "Entity Label:")
-        if ok and label:
-            # Ask for Entity Type
-            entity_type, type_ok = QInputDialog.getItem(
-                self, "Select Type", "Entity Type:", EntityNode.TYPES, 0, False
-            )
-            if not type_ok:
-                entity_type = "IP"
-
+        dlg = AddEntityDialog(self)
+        if dlg.exec_() == QDialog.Accepted:
+            data = dlg.get_data()
             node_id = f"node_{len(self.scene.nodes) + 1}"
-            node = EntityNode(node_id, label, entity_type=entity_type)
-            node.setPos(0, 0)
+            
+            node = EntityNode(
+                entity_id=node_id,
+                label=data["label"],
+                entity_type=data["type"],
+                url=data["url"],
+                color=data["color"],
+                comments=data["comments"],
+                badge=data["badge"],
+                size=data["size"]
+            )
+            
+            center_pos = self.view.mapToScene(self.view.viewport().rect().center())
+            node.setPos(center_pos)
+            
             self.scene.addItem(node)
             self.scene.nodes[node_id] = node
-
 
 # ---------------------------------------------------------------------------
 # GUI
