@@ -19,7 +19,10 @@ from core.detailed_scan import DETAILED_SCAN_MODULES
 from core.beauty import render_host_page_html, CYBERPUNK_QSS
 from core.db_functions import DB_PATH, init_db, save_entry_to_db, search_db, db_stats
 from core.scan import COMMON_PORTS, WEB_PORTS, set_tor_enabled, scan_host, expand_targets
-from core.graph import AddEntityDialog, InteractiveGraphScene, GraphView, EntityNode, AddEntityDialog, SideDetailsPanel, raw_json_to_graph
+from core.graph import (
+    AddEntityDialog, InteractiveGraphScene, GraphView, EntityNode,
+    SideDetailsPanel, raw_json_to_graph, new_node_id
+)
 
 
 class ScanWorker(QThread):
@@ -121,7 +124,7 @@ class GraphTabWidget(QWidget):
         toolbar.addAction(add_root_btn)
 
         layout_btn = QAction("⚡ Auto Layout", self)
-        layout_btn.triggered.connect(self.scene.auto_layout)
+        layout_btn.triggered.connect(lambda checked=False: self.scene.auto_layout())
         toolbar.addAction(layout_btn)
 
         main_layout.addWidget(toolbar)
@@ -169,7 +172,7 @@ class GraphTabWidget(QWidget):
         dlg = AddEntityDialog(self)
         if dlg.exec_() == QDialog.Accepted:
             data = dlg.get_data()
-            node_id = f"node_{len(self.scene.nodes) + 1}"
+            node_id = new_node_id()
             
             node = EntityNode(
                 entity_id=node_id,
@@ -398,7 +401,6 @@ class ScannerWindow(QWidget):
             QMessageBox.warning(self, "Could not read file", str(e))
             return
 
-        # Accept one target per line
         lines = []
         for line in raw.splitlines():
             line = line.split("#", 1)[0].strip()
