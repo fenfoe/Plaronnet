@@ -1,6 +1,8 @@
+import re
 import sys
 import json
-import re
+import uuid
+import math
 from PyQt5.QtCore import Qt, QRectF, QLineF
 from PyQt5.QtGui import QPen, QColor, QFont, QPainter, QBrush, QFontMetrics
 from PyQt5.QtWidgets import (
@@ -12,11 +14,17 @@ from PyQt5.QtWidgets import (
 )
 
 
+def new_node_id():
+    """Generate a globally-unique node id. Using uuid4 means ids never
+    collide even after nodes have been deleted/re-added across sessions,
+    unlike a counter derived from the current node count."""
+    return f"node_{uuid.uuid4().hex}"
+
+
 def raw_json_to_graph(raw_data, root_label="ROOT"):
     """Recursively converts raw JSON into graph format using Regex pattern matching for accuracy."""
     nodes = []
     edges = []
-    node_counter = [0]
 
     # Regular Expressions for Entity Type Matching
     IP_REGEX = re.compile(r"^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$")
@@ -55,8 +63,7 @@ def raw_json_to_graph(raw_data, root_label="ROOT"):
         return "domain name" if isinstance(val, dict) else "website" if isinstance(val, list) else "IP"
 
     def traverse(data, key_label, parent_id=None, depth=0, y_offset=[0]):
-        node_counter[0] += 1
-        node_id = f"node_{node_counter[0]}"
+        node_id = new_node_id()
         
         node_type = get_node_type(data, key=key_label)
         display_label = str(key_label) if isinstance(data, (dict, list)) else f"{key_label}: {data}"
@@ -555,16 +562,36 @@ class InteractiveGraphScene(QGraphicsScene):
         self.edges_list.clear()
 
         for item in json_data.get("nodes", []):
+            # Fall back to a fresh uuid if an incoming file has no id, a
+            # blank id, or (for old exports) a duplicate id already seen
+            # in this file — guarantees no in-scene collisions on import.
+            raw_id = str(item.get("id", "")).strip()
+            node_id = raw_id if raw_id and raw_id not in self.nodes else new_node_id()
+
             node = EntityNode(
-                str(item["id"]), 
-                item["label"], 
+                node_id,
+                item.get("label", "Unnamed"),
                 entity_type=item.get("type", "IP"),
-                url=item.get("url", ""),  # Load saved URL
-                comments=item.get("comments", "")
+                url=item.get("url", ""),
+                comments=item.get("comments", ""),
+                color=item.get("color", "#238636"),
+                badge=item.get("badge", "none"),
+                size=item.get("size", "M")
             )
             node.setPos(item.get("x", 0), item.get("y", 0))
             self.addItem(node)
-            self.nodes[str(item["id"])] = node
+            self.nodes[node_id] = node
+
+        for conn in json_data.get("edges", []):
+            src_id = str(conn.get("source") or conn.get("from") or "")
+            tgt_id = str(conn.get("target") or conn.get("to") or "")
+            src_node = self.nodes.get(src_id)
+            tgt_node = self.nodes.get(tgt_id)
+            if src_node and tgt_node:
+                self.connect_nodes(src_node, tgt_node)
+
+        for edge in self.edges_list:
+            edge.update_position()
 
     def export_to_json(self):
         nodes_data = []
@@ -573,9 +600,12 @@ class InteractiveGraphScene(QGraphicsScene):
             nodes_data.append({
                 "id": str(node_id),
                 "label": node.label,
-                "url": node.url,  # Export URL field
+                "url": node.url,
                 "type": node.entity_type,
                 "comments": node.comments,
+                "color": node.accent_color.name(),
+                "badge": node.badge,
+                "size": node.node_size,
                 "x": round(pos.x(), 2),
                 "y": round(pos.y(), 2)
             })
@@ -603,7 +633,12 @@ class InteractiveGraphScene(QGraphicsScene):
         self.edges_list.append(edge)
         return edge
 
-    def auto_layout(self, node_spacing_x=180, layer_spacing_y=120):
+    def auto_layout(self, radius_step=180):
+        """Radial layout: the root sits at the center and each connection
+        hop moves outward one ring, like the spokes of a wheel/snowflake.
+        Each node's angular slice is sized proportionally to how many
+        descendants it has, so a branch with many children gets more
+        angular room than a lone leaf."""
         if not self.nodes:
             return
 
@@ -612,42 +647,82 @@ class InteractiveGraphScene(QGraphicsScene):
         if not roots:
             roots = [next(iter(self.nodes.values()))]
 
-        visited = set()
-        global_x = [0.0]
-
-        def layout_subtree(node, depth):
-            if node.id in visited:
-                return node.scenePos().x()
-            visited.add(node.id)
-
+        def get_children(node, seen):
             children = []
             for edge in node.edges:
                 child = edge.target if edge.source == node else edge.source
-                if child.id not in visited:
+                if child.id not in seen:
                     children.append(child)
+            return children
 
-            y_pos = depth * layer_spacing_y
+        # Pass 1: weight each node by its descendant-leaf count, so
+        # branches get angular space proportional to how much they contain.
+        weight_cache = {}
+        weighed = set()
 
+        def compute_weight(node):
+            if node.id in weighed:
+                return 0
+            weighed.add(node.id)
+            children = get_children(node, weighed)
             if not children:
-                x_pos = global_x[0] * node_spacing_x
-                node.setPos(x_pos, y_pos)
-                global_x[0] += 1.0
-                return x_pos
-
-            child_x = [layout_subtree(c, depth + 1) for c in children]
-            parent_x = (min(child_x) + max(child_x)) / 2.0
-            node.setPos(parent_x, y_pos)
-            return parent_x
+                weight_cache[node.id] = 1
+                return 1
+            total = sum(compute_weight(c) for c in children)
+            weight_cache[node.id] = max(total, 1)
+            return weight_cache[node.id]
 
         for root in roots:
-            layout_subtree(root, 0)
-            global_x[0] += 0.5
+            compute_weight(root)
+
+        # If there's more than one disconnected root, don't stack them all
+        # at the exact center — start them one ring out instead.
+        depth_offset = 0 if len(roots) == 1 else 1
+
+        visited = set()
+
+        def place(node, depth, angle_start, angle_end):
+            if node.id in visited:
+                return
+            visited.add(node.id)
+
+            effective_depth = depth + depth_offset
+            angle_mid = (angle_start + angle_end) / 2.0
+            if effective_depth == 0:
+                x, y = 0.0, 0.0
+            else:
+                r = effective_depth * radius_step
+                x = r * math.cos(angle_mid)
+                y = r * math.sin(angle_mid)
+            node.setPos(x, y)
+
+            children = get_children(node, visited)
+            if not children:
+                return
+
+            total_weight = sum(weight_cache.get(c.id, 1) for c in children)
+            cursor = angle_start
+            span_total = angle_end - angle_start
+            for c in children:
+                w = weight_cache.get(c.id, 1)
+                span = span_total * (w / total_weight) if total_weight else span_total / len(children)
+                place(c, depth + 1, cursor, cursor + span)
+                cursor += span
+
+        total_root_weight = sum(weight_cache.get(r.id, 1) for r in roots) or 1
+        two_pi = 2 * math.pi
+        cursor = 0.0
+        for root in roots:
+            w = weight_cache.get(root.id, 1)
+            span = two_pi * (w / total_root_weight)
+            place(root, 0, cursor, cursor + span)
+            cursor += span
 
     def add_manual_child(self, parent_node):
         dlg = AddEntityDialog(None, default_label="")
         if dlg.exec_() == QDialog.Accepted:
             data = dlg.get_data()
-            new_id = f"node_{len(self.nodes) + 1}"
+            new_id = new_node_id()
             new_node = EntityNode(
                 new_id, 
                 data["label"], 
